@@ -61,6 +61,7 @@ def pipeline(model_path: str,
     logger.setLevel(log_level)
 
     # model_path is not local path.
+    logger.error(f'zmz Loading model from {model_path}, download_dir {backend_config.download_dir}')
     if not os.path.exists(model_path):
         download_dir = backend_config.download_dir \
             if backend_config is not None else None

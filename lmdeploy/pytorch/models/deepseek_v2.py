@@ -19,6 +19,8 @@ from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
 from .utils.cudagraph import CudaGraphMixin
 
+from lmdeploy.utils import get_logger
+logger = get_logger('lmdeploy')
 
 def yarn_get_mscale(scale=1, mscale=1):
     if scale <= 1:
@@ -374,6 +376,7 @@ class DeepseekV2MoE(nn.Module):
         dp = dist_ctx.dp
         world_size = dist_ctx.world_size
         moe_all_reduce = dp > 1 and dist_ctx.tp > 1
+        logger.error(f"zmz build_fused_moe, quantization_config {quantization_config}")
         self.experts = build_fused_moe(
             self.hidden_dim,
             self.ffn_dim,
@@ -649,6 +652,7 @@ class DeepseekV2ForCausalLM(nn.Module, CudaGraphMixin):
                  device: torch.device = None):
         super().__init__()
         self.config = config
+        config.num_hidden_layers = 5 # zmz
         self.quantization_config = getattr(config, 'quantization_config', None)
         self.dtype = dtype
         self.ctx_mgr = ctx_mgr
@@ -865,6 +869,13 @@ class DeepseekV2ForCausalLM(nn.Module, CudaGraphMixin):
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
+            # zmz begin
+            strs = name.split(".")
+            if len(strs) >= 3 and str.isdigit(strs[2]):
+                layer_number = int(strs[2])
+                if layer_number >= 5:
+                    continue
+            # zmz end
             if 'rotary_emb.inv_freq' in name:
                 continue
             if ('rotary_emb.cos_cached' in name or 'rotary_emb.sin_cached' in name):

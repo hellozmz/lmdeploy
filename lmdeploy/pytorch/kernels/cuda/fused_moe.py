@@ -214,7 +214,12 @@ def _start_end_kernel(TopkIdx, SortedIdx, ExpStart, ExpEnd, len_sorted_idx: int,
         sidx_mask = sidx_off < len_sorted_idx
         sidx = tl.load(SortedIdx + sidx_off, mask=sidx_mask, other=0)
         tidx = tl.load(TopkIdx + sidx, mask=sidx_mask, other=num_experts)
-        tidx_mask = tidx == exp_id
+
+        # 新增条件：排除 -1 的处理
+        valid_mask = tidx != -1  # 新增有效性检查
+        tidx_mask = (tidx == exp_id) & valid_mask  # 组合条件
+        # tidx_mask = tidx == exp_id
+
         cnt += tl.sum(tidx_mask.to(tl.int32))
         if cnt > 0 and exp_start < 0:
             exp_start = sidx_start + tl.argmax(tidx_mask, axis=0)
@@ -258,6 +263,8 @@ def get_start_end(topk_idx: torch.Tensor, sorted_idx: torch.Tensor, num_experts:
 
 def _get_sorted_idx(topk_ids: torch.Tensor, num_experts: int):
     """get sorted idx."""
+    # assert torch.all(topk_ids >= 0), "get topk_ids < 0"
+    # assert torch.all(topk_ids < num_experts), "get topk_ids >= num_experts"
     flatten_topk_ids = topk_ids.flatten()
     sorted_idx = flatten_topk_ids.argsort()
 

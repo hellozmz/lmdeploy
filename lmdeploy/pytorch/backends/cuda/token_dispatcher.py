@@ -11,8 +11,13 @@ from typing import Optional, Tuple
 import torch
 import torch.distributed as dist
 
+import os
+
 _buffer_normal = None
 
+from lmdeploy.utils import get_logger
+
+logger = get_logger('lmdeploy')
 
 def get_buffer_normal(group: dist.ProcessGroup, hidden_bytes: int):
     """Copy from DeepEP example usage in model inference prefilling.
@@ -123,8 +128,19 @@ class DeepEPDispatcher:
         self.handle = handle
         self.topk_idx = topk_idx
         self.topk_weights = topk_weights
+        # ori_hidden_states = hidden_states.clone()
         if hidden_states.shape[0] > 0:
-            hidden_states = self.get_permuted_hidden_states_by_experts(hidden_states)
+            # expert dim is the first dim
+            
+            use_triton = os.getenv('ZMZ_USE_TRITON_IMPL', '0') == '1'
+            if use_triton:
+                # test
+                # hidden_states = self.get_permuted_hidden_states_by_experts(hidden_states)
+                pass
+            else:
+                hidden_states = self.get_permuted_hidden_states_by_experts(hidden_states)
+        # logger.error(f"zmz come into dispatch, hidden_states: {hidden_states.shape}")
+        # return hidden_states, topk_idx, topk_weights, tokens_per_expert, ori_hidden_states
         return hidden_states, topk_idx, topk_weights, tokens_per_expert
 
     def dispatch_normal(
@@ -180,7 +196,14 @@ class DeepEPDispatcher:
 
     def combine(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if hidden_states.shape[0] > 0:
-            hidden_states = self.get_restored_hidden_states_by_experts(hidden_states)
+            # expert dim is the first dim
+            use_triton = os.getenv('ZMZ_USE_TRITON_IMPL', '0') == '1'
+            if use_triton:
+                # test
+                # hidden_states = self.get_restored_hidden_states_by_experts(hidden_states)
+                pass
+            else:
+                hidden_states = self.get_restored_hidden_states_by_experts(hidden_states)
         hidden_states, event = self.combine_normal(hidden_states, self.handle)
         self.handle = None
         return hidden_states.view(self.hidden_shape)

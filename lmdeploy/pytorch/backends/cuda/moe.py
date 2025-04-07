@@ -5,6 +5,8 @@ from typing import List
 import torch
 import torch.distributed as dist
 
+import os
+
 from lmdeploy.pytorch.backends.cuda.token_dispatcher import DeepEPDispatcher
 from lmdeploy.pytorch.kernels.cuda import fused_moe, fused_moe_w8a8
 from lmdeploy.pytorch.kernels.cuda.blocked_fp8_fused_moe import fused_moe_blocked_fp8
@@ -17,6 +19,9 @@ from lmdeploy.pytorch.models.q_modules import QTensor
 from ..moe import (FusedMoEBlockedF8Builder, FusedMoEBlockedF8Impl, FusedMoEBuilder, FusedMoEImpl, FusedMoEW8A8Builder,
                    FusedMoEW8A8Impl)
 
+from lmdeploy.utils import get_logger
+
+logger = get_logger('lmdeploy')
 
 class TritonFusedMoEImpl(FusedMoEImpl):
     """triton fused moe implementation."""
@@ -196,17 +201,32 @@ class TritonFusedMoEBlockedF8Impl(FusedMoEBlockedF8Impl):
         return list(range(first_expert, last_expert))
 
     def forward(self,
-                hidden_states: torch.Tensor,
-                topk_weights: torch.Tensor,
-                topk_ids: torch.LongTensor,
-                gate_up_weights: torch.Tensor,
-                gate_up_scale: torch.Tensor,
-                down_weights: torch.Tensor,
-                down_scale: torch.Tensor,
-                expert_list: List[int] = None):
+                hidden_states: torch.Tensor,            # [batch_size*seq_len, hidden_dim] 输入特征             [11, 7168]
+                topk_weights: torch.Tensor,             # [batch_size*seq_len, topk] 前k专家的权重系数           [11, 8]
+                topk_ids: torch.LongTensor,             # [batch_size*seq_len, topk] 前k个专家的索引             [11, 8]
+                gate_up_weights: torch.Tensor,          # [num_experts, intermediate_dim*2, hidden_dim] 输入特征到门控网络的权重                                 [256, 4096, 7168]
+                gate_up_scale: torch.Tensor,            # [num_experts, intermediate_dim*2//block_size, hidden_dim//block_size] 输入特征到门控网络的缩放因子     [256, 32, 56]
+                down_weights: torch.Tensor,             # [num_experts, hidden_dim, intermediate_dim] 门控网络到输出的权重                                       [256, 7168, 2048]
+                down_scale: torch.Tensor,               # [num_experts, hidden_dim//block_size, intermediate_dim//block_size] 门控网络到输出的缩放因子           [256, 56, 16]
+                expert_list: List[int] = None):         # [num_experts] 专家的索引列表                                                      None
         """forward."""
-        input_size = hidden_states.shape
-        hidden_states = hidden_states.flatten(0, -2)
+        """
+        hidden_states 7168
+        intermediate_dim 2048
+        """
+        use_triton = os.getenv('ZMZ_USE_TRITON_IMPL', '0') == '1'
+        # if not use_triton:
+        #     torch.save(hidden_states, "ep1_hidden_states.pt")
+        #     torch.save(topk_weights, "ep1_topk_weights.pt")
+        #     torch.save(topk_ids, "ep1_topk_ids.pt")
+        # assert False, "zmz debug"
+        # if hidden_states.shape[0] != -1234:
+        #     logger.error(f"zmz hidden_states: {hidden_states.shape}, topk_ids: {topk_ids.shape}, topk_weights: {topk_weights.shape}, gate_up_weights: {gate_up_weights.shape}, gate_up_scale: {gate_up_scale.shape}, down_weights: {down_weights.shape}, down_scale: {down_scale.shape}")
+        #     logger.error(f"zmz expert_list: {expert_list}, topk_ids: {topk_ids}, topk_weights: {topk_weights}")
+
+        input_size = hidden_states.shape                # [batch_size*seq_len, hidden_dim]
+        hidden_states = hidden_states.flatten(0, -2)    # [batch_size*seq_len, hidden_dim]
+        # 量化成fp8
         input_quant, input_scale = quant_fp8(hidden_states, self.block_size, dtype=gate_up_weights.dtype)
 
         expert_offset = 0
@@ -228,6 +248,14 @@ class TritonFusedMoEBlockedF8Impl(FusedMoEBlockedF8Impl):
                                        num_experts=num_experts,
                                        renormalize=self.renormalize)
         output = output.unflatten(0, input_size[:-1])
+        # out_states = output
+        # if hidden_states.shape[0] != -1234:
+        #     logger.error(f"zmz super_out_states.shape: {out_states.shape},")
+        #     # torch.save(out_states, "ep1_out_states.pt")
+        #     logger.error(f"zmz super_out_states: {out_states}")
+        # if not use_triton:
+        #     torch.save(output, "ep1_out_states.pt")
+        #     raise Exception("zmz debug")
         return output
 
 
@@ -340,6 +368,15 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
                  block_size: int = 128,
                  out_dtype: torch.dtype = torch.bfloat16):
         super().__init__(top_k, num_experts, renormalize, block_size, out_dtype)
+        
+        # 新增Triton实现实例
+        self.triton_impl = TritonFusedMoEBlockedF8Impl(
+            top_k=top_k,
+            num_experts=num_experts,
+            renormalize=renormalize,
+            block_size=block_size,
+            out_dtype=out_dtype
+        )
         self.token_dispatcher = DeepEPDispatcher(
             group=ep_group,
             num_experts=self.num_experts,
@@ -359,16 +396,62 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
                 down_scale: torch.Tensor,
                 expert_list: List[int] = None):
         """forward."""
-        topk_weights = _renormalize(topk_weights, self.renormalize)
+        # 在ep=2场景下，输入了所有的token进来，但是experts只有一半。
+        # 对于不存在的experts，topk_ids当前是所有，经过下面的dispatch后，会变成一半。
+        # 所以，这里需要对topk_ids进行处理，只保留当前rank的experts。
+        # 这里的expert_list是当前rank的experts。
+
+        # 接下来输出下token的shape和expert list
+
+        # hidden_states = torch.load("ep1_hidden_states.pt")
+        # topk_weights = torch.load("ep1_topk_weights.pt")
+        # topk_ids = torch.load("ep1_topk_ids.pt")
+
+        # if hidden_states.shape[0] != -1234:
+        #     logger.error(f"zmz hidden_states: {hidden_states.shape}, topk_ids: {topk_ids.shape}, topk_weights: {topk_weights.shape}, gate_up_weights: {gate_up_weights.shape}, gate_up_scale: {gate_up_scale.shape}, down_weights: {down_weights.shape}, down_scale: {down_scale.shape}")
+        #     logger.error(f"zmz expert_list: {expert_list}, topk_ids: {topk_ids}, topk_weights: {topk_weights}")
+
+
+        # logger.error(f"zmz self.renormalize: {self.renormalize}")
+        # expert is first
+        use_triton = os.getenv('ZMZ_USE_TRITON_IMPL', '0') == '1'
+        if use_triton:
+            # logger.error(f"zmz use triton impl")
+            if not topk_weights.is_contiguous():
+                topk_weights = topk_weights.contiguous()
+            pass
+        else:
+            topk_weights = _renormalize(topk_weights, self.renormalize)
+
         recv_hidden_states, recv_topk_ids, recv_topk_weights, tokens_per_expert = (self.token_dispatcher.dispatch(
             hidden_states,
             topk_ids,
             topk_weights.to(torch.float32),
             self.num_experts,
         ))
-        out_states = self.experts.forward(recv_hidden_states, tokens_per_expert, gate_up_weights, gate_up_scale,
+        # 需要修改的内容：
+        # 1. 只需要获取dispatch后的input, topk_ids(当前出现的-1，看代码在kernel中是能走过的)
+        # if hidden_states.shape[0] != -1234:
+        #     logger.error(f"zmz recv_hidden_states.shape: {recv_hidden_states.shape}, recv_topk_ids.shape: {recv_topk_ids.shape}, recv_topk_weights.shape: {recv_topk_weights.shape}, tokens_per_expert.shape: {tokens_per_expert.shape}")
+        #     logger.error(f"zmz *recv_hidden_states: {recv_hidden_states}")
+        #     logger.error(f"zmz recv_topk_ids: {recv_topk_ids}, recv_topk_weights: {recv_topk_weights}, tokens_per_expert: {tokens_per_expert}")
+
+        if use_triton:
+            # logger.error(f"zmz use triton impl")
+            out_states = self.triton_impl.forward(recv_hidden_states, recv_topk_weights, recv_topk_ids, gate_up_weights,
+                gate_up_scale, down_weights, down_scale, expert_list=expert_list )
+        else:
+            out_states = self.experts.forward(recv_hidden_states, tokens_per_expert, gate_up_weights, gate_up_scale,
                                           down_weights, down_scale)
+
+
         out_states = self.token_dispatcher.combine(out_states)
+        out_states_ep1 = torch.load("ep1_out_states.pt")
+        # logger.error(f"zmz out_states.shape: {out_states.shape}, out_states_ep1.shape: {out_states_ep1.shape}")
+        # torch.allclose(out_states, out_states_ep1, atol=1e-5, rtol=1e-5)
+        # logger.error("allclose success")
+        # raise Exception("zmz debug ep2")
+
         return out_states
 
 
@@ -386,6 +469,8 @@ class TritonFusedMoEBlockedF8Builder(FusedMoEBlockedF8Builder):
               out_dtype: torch.dtype = torch.float16):
         """build from mlp."""
         if ep_size > 1:
+        # if ep_size == -100:
+            logger.error(f"zmz FusedDeepEpMoEBlockedF8Impl")
             return FusedDeepEpMoEBlockedF8Impl(ep_size=ep_size,
                                                ep_group=ep_group,
                                                top_k=top_k,
@@ -395,6 +480,7 @@ class TritonFusedMoEBlockedF8Builder(FusedMoEBlockedF8Builder):
                                                block_size=block_size,
                                                out_dtype=out_dtype)
         else:
+            logger.error(f"zmz TritonFusedMoEBlockedF8Impl")
             return TritonFusedMoEBlockedF8Impl(top_k=top_k,
                                                num_experts=num_experts,
                                                renormalize=renormalize,

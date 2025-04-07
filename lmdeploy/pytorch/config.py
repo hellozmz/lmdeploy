@@ -100,6 +100,7 @@ class DistConfig:
 
     def __post_init__(self):
         """post init."""
+        print(f"dp_rank: {self.dp_rank}, dp: {self.dp}", flush=True)
         assert self.dp_rank < self.dp
         assert self.dp >= 1
         if self.dp == 1:
