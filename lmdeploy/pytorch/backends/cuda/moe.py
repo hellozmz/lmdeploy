@@ -403,9 +403,9 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
 
         # 接下来输出下token的shape和expert list
 
-        # hidden_states = torch.load("ep1_hidden_states.pt")
-        # topk_weights = torch.load("ep1_topk_weights.pt")
-        # topk_ids = torch.load("ep1_topk_ids.pt")
+        hidden_states = torch.load("ep1_hidden_states.pt")
+        topk_weights = torch.load("ep1_topk_weights.pt")
+        topk_ids = torch.load("ep1_topk_ids.pt")
 
         # if hidden_states.shape[0] != -1234:
         #     logger.error(f"zmz hidden_states: {hidden_states.shape}, topk_ids: {topk_ids.shape}, topk_weights: {topk_weights.shape}, gate_up_weights: {gate_up_weights.shape}, gate_up_scale: {gate_up_scale.shape}, down_weights: {down_weights.shape}, down_scale: {down_scale.shape}")
@@ -417,8 +417,8 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
         use_triton = os.getenv('ZMZ_USE_TRITON_IMPL', '0') == '1'
         if use_triton:
             # logger.error(f"zmz use triton impl")
-            if not topk_weights.is_contiguous():
-                topk_weights = topk_weights.contiguous()
+            # if not topk_weights.is_contiguous():
+            #     topk_weights = topk_weights.contiguous()
             pass
         else:
             topk_weights = _renormalize(topk_weights, self.renormalize)
@@ -446,11 +446,11 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
 
 
         out_states = self.token_dispatcher.combine(out_states)
-        out_states_ep1 = torch.load("ep1_out_states.pt")
-        # logger.error(f"zmz out_states.shape: {out_states.shape}, out_states_ep1.shape: {out_states_ep1.shape}")
-        # torch.allclose(out_states, out_states_ep1, atol=1e-5, rtol=1e-5)
-        # logger.error("allclose success")
-        # raise Exception("zmz debug ep2")
+        out_states_ep1 = torch.load("ep1_output.pt")
+        logger.error(f"zmz out_states.shape: {out_states.shape}, out_states_ep1.shape: {out_states_ep1.shape}")
+        torch.allclose(out_states, out_states_ep1, atol=1e-5, rtol=1e-5)
+        logger.error("allclose success")
+        raise Exception("zmz debug ep2")
 
         return out_states
 
