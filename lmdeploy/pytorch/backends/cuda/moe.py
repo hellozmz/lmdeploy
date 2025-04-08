@@ -215,10 +215,15 @@ class TritonFusedMoEBlockedF8Impl(FusedMoEBlockedF8Impl):
         intermediate_dim 2048
         """
         use_triton = os.getenv('ZMZ_USE_TRITON_IMPL', '0') == '1'
-        # if not use_triton:
-        #     torch.save(hidden_states, "ep1_hidden_states.pt")
-        #     torch.save(topk_weights, "ep1_topk_weights.pt")
-        #     torch.save(topk_ids, "ep1_topk_ids.pt")
+        if not use_triton:
+            torch.save(hidden_states, "ep1_hidden_states.pt")
+            torch.save(topk_weights, "ep1_topk_weights.pt")
+            torch.save(topk_ids, "ep1_topk_ids.pt")
+            torch.save(gate_up_weights, "ep1_gate_up_weights.pt")
+            torch.save(gate_up_scale, "ep1_gate_up_scale.pt")
+            torch.save(down_weights, "ep1_down_weights.pt")
+            torch.save(down_scale, "ep1_down_scale.pt")
+            torch.save(expert_list, "ep1_expert_list.pt")
         # assert False, "zmz debug"
         # if hidden_states.shape[0] != -1234:
         #     logger.error(f"zmz hidden_states: {hidden_states.shape}, topk_ids: {topk_ids.shape}, topk_weights: {topk_weights.shape}, gate_up_weights: {gate_up_weights.shape}, gate_up_scale: {gate_up_scale.shape}, down_weights: {down_weights.shape}, down_scale: {down_scale.shape}")
@@ -253,9 +258,9 @@ class TritonFusedMoEBlockedF8Impl(FusedMoEBlockedF8Impl):
         #     logger.error(f"zmz super_out_states.shape: {out_states.shape},")
         #     # torch.save(out_states, "ep1_out_states.pt")
         #     logger.error(f"zmz super_out_states: {out_states}")
-        # if not use_triton:
-        #     torch.save(output, "ep1_out_states.pt")
-        #     raise Exception("zmz debug")
+        if not use_triton:
+            torch.save(output, "ep1_output.pt")
+            raise Exception("zmz debug")
         return output
 
 
@@ -403,14 +408,21 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
 
         # 接下来输出下token的shape和expert list
 
+
+        logger.error(f"zmz before hidden_states: {hidden_states.shape}, topk_ids: {topk_ids.shape}, topk_weights: {topk_weights.shape}, gate_up_weights: {gate_up_weights.shape}, gate_up_scale: {gate_up_scale.shape}, down_weights: {down_weights.shape}, down_scale: {down_scale.shape}")
+        logger.error(f"zmz before expert_list: {expert_list}, topk_ids: {topk_ids}, topk_weights: {topk_weights}")
+
         hidden_states = torch.load("ep1_hidden_states.pt")
         topk_weights = torch.load("ep1_topk_weights.pt")
         topk_ids = torch.load("ep1_topk_ids.pt")
+        gate_up_scale = torch.load("ep1_gate_up_scale.pt")
+        gate_up_weights = torch.load("ep1_gate_up_weights.pt")
+        down_scale = torch.load("ep1_down_scale.pt")
+        down_weights = torch.load("ep1_down_weights.pt")
+        expert_list = torch.load("ep1_expert_list.pt")
 
-        # if hidden_states.shape[0] != -1234:
-        #     logger.error(f"zmz hidden_states: {hidden_states.shape}, topk_ids: {topk_ids.shape}, topk_weights: {topk_weights.shape}, gate_up_weights: {gate_up_weights.shape}, gate_up_scale: {gate_up_scale.shape}, down_weights: {down_weights.shape}, down_scale: {down_scale.shape}")
-        #     logger.error(f"zmz expert_list: {expert_list}, topk_ids: {topk_ids}, topk_weights: {topk_weights}")
-
+        logger.error(f"zmz after hidden_states: {hidden_states.shape}, topk_ids: {topk_ids.shape}, topk_weights: {topk_weights.shape}, gate_up_weights: {gate_up_weights.shape}, gate_up_scale: {gate_up_scale.shape}, down_weights: {down_weights.shape}, down_scale: {down_scale.shape}")
+        logger.error(f"zmz after expert_list: {expert_list}, topk_ids: {topk_ids}, topk_weights: {topk_weights}")
 
         # logger.error(f"zmz self.renormalize: {self.renormalize}")
         # expert is first
@@ -448,8 +460,11 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
         out_states = self.token_dispatcher.combine(out_states)
         out_states_ep1 = torch.load("ep1_output.pt")
         logger.error(f"zmz out_states.shape: {out_states.shape}, out_states_ep1.shape: {out_states_ep1.shape}")
-        torch.allclose(out_states, out_states_ep1, atol=1e-5, rtol=1e-5)
+        assert torch.allclose(out_states, out_states_ep1, atol=1e-5, rtol=1e-5)
         logger.error("allclose success")
+        
+        print(f"out_states: {out_states.shape}, out_states1: {out_states_ep1.shape}, out_states: {out_states}, out_states1: {out_states_ep1}")
+        assert torch.allclose(out_states, out_states_ep1, atol=1e-2, rtol=1e-2)
         raise Exception("zmz debug ep2")
 
         return out_states
