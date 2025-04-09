@@ -9,6 +9,7 @@ from .blocked_gemm_fp8 import quant_fp8
 from .fused_moe import _get_sorted_idx, _make_intermediate, _renormalize
 
 
+from lmdeploy.pytorch.distributed import get_dist_manager, get_ep_world_rank, get_tp_world_rank
 from lmdeploy.utils import get_logger
 
 logger = get_logger('lmdeploy')
@@ -77,12 +78,25 @@ def fused_moe_blocked_f8_kernel(
 
     exp_start = tl.load(ExpStart + exp_id + expert_offset)
     exp_end = tl.load(ExpEnd + exp_id + expert_offset)
+    # tl.device_print("[KernelDebug] exp_id=%d, exp_start=%d, exp_end=%d",
+    #          exp_id, exp_start, exp_end)
     M = exp_end - exp_start
     
     # 新增调试日志
-    # tl.device_print("[KernelDebug] exp_id=%d, exp_start=%d, exp_end=%d, M=%d", 
-    #          exp_id, exp_start, exp_end, M)
+    # if pid == 0:
+        
+        # tl.device_print("[KernelDebug] exp_id=%d, exp_start=%d, exp_end=%d, M=%d, expert_offset=%d", exp_id, exp_start, exp_end, M, expert_offset)
+    # tl.device_print("[KernelDebug] exp_id={exp_id}, exp_start={exp_start}, exp_end={exp_end}, M={M}, expert_offset={expert_offset}", exp_id, exp_start, exp_end, M, expert_offset)
     if M <= 0:                          # 当传递的topk_id=-1的时候，作差之后的个数会是0，会在这里被跳过。代码逻辑是符合预期的。
+        # if pid == 0 and exp_id == 17:
+        #     if expert_offset == 0:
+        #         tl.device_print("[KernelDebug] M <= 0, skipping, M", M, hex=False)
+        #         tl.device_print("[KernelDebug] pid", pid, hex=False)
+        #         tl.device_print("[KernelDebug] exp_id", exp_id, hex=False)
+        #         tl.device_print("[KernelDebug] exp_start", exp_start.to(tl.int64), hex=False)
+        #         tl.device_print("[KernelDebug] exp_end", exp_end, hex=False)
+        #         tl.device_print("[KernelDebug] expert_offset", expert_offset, hex=False)
+        #         # tl.device_print("[KernelDebug] ExpStart.dtype", ExpStart.dtype)
         return
 
     num_pid_m = tl.cdiv(M_NP2, BLOCK_SIZE_M)
@@ -107,6 +121,8 @@ def fused_moe_blocked_f8_kernel(
     mask_sid = offs_sid < exp_end
     # 加载排序后的全局token索引（来自预排序的SortedIdx数组）
     sid = tl.load(SortedIdx + offs_sid, mask=mask_sid, other=0)
+    # tl.device_print("[KernelDebug] exp_id=%d, pid_m=%d, pid_n=%d, sid=%d",
+    #          exp_id, pid_m, pid_n, sid)
 
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     if reindex_a:
@@ -158,6 +174,9 @@ def fused_moe_blocked_f8_kernel(
 
     if ENABLE_WEIGHTS:
         weight = tl.load(Weights + sid, mask=mask_sid)
+        #if weight has 0.0
+        # if tl.sum(weight == 0.0) > 0:
+        #     tl.device_print("[KernelDebug] exp_id=%d, weight has 0.0", exp_id)
         c = c * weight[:, None].to(c.dtype)
 
     c = c.to(C.dtype.element_ty)
@@ -202,10 +221,13 @@ def fused_moe_blocked_fp8_kernel_launcher(
     E, N, K = B.shape
 
     # if A.shape[0] != -1234:
-    #     unique_experts = torch.unique(sorted_idx % E)
-    #     logger.error(f"[MoeKernel] Active experts: {unique_experts.tolist()}")
-    #     logger.error(f"[MoeKernel] ExpStart: {exp_start.tolist()}...")
-    #     logger.error(f"[MoeKernel] ExpEnd: {exp_end.tolist()}...")
+    #     # unique_experts = torch.unique(sorted_idx % E)
+    #     # logger.error(f"[MoeKernel] sorted_idx: {sorted_idx.tolist()}")
+    #     # logger.error(f"[MoeKernel] ExpStart: {exp_start.tolist()}...")
+    #     # logger.error(f"[MoeKernel] ExpEnd: {exp_end.tolist()}...")
+    #     logger.error(f"[MoeKernel] sorted_idx: {sorted_idx}")
+    #     logger.error(f"[MoeKernel] ExpStart: {exp_start}..., len:{len(exp_start)}")
+    #     logger.error(f"[MoeKernel] ExpEnd: {exp_end}..., len:{len(exp_end)}")
 
     assert A.dim() == 2
     assert A_scale.dim() == 2
@@ -295,7 +317,9 @@ def fused_moe_blocked_fp8(input: torch.Tensor,
     if num_experts is None:
         num_experts = E
     full_exp = num_experts == E
+    # full_exp = (num_experts >= E)
     group_size = input.size(-1) // input_scale.size(-1)
+    logger.error(f"[MoeKernel] full_exp: {full_exp}, num_experts: {num_experts}, E: {E}, expert_offset: {expert_offset}, topk_ids: {topk_ids}, group_size: {group_size}")
     
     
     # 新增输入维度分析日志
@@ -312,8 +336,26 @@ def fused_moe_blocked_fp8(input: torch.Tensor,
     #     # logger.error(f"[MoE结构分析] topk_ids: {topk_ids}")
 
     topk_weights = _renormalize(topk_weights, renormalize)
-    sorted_idx, exp_start, exp_end = _get_sorted_idx(topk_ids, num_experts)
+    # TODO：给tensor topk_ids中，数值中非-1的数据加上expert_offset
+    topk_ids[topk_ids != -1] += expert_offset
+    logger.error(f"[MoE结构分析] topk_ids: {topk_ids}")
 
+    sorted_idx, exp_start, exp_end = _get_sorted_idx(topk_ids, num_experts)
+    # torch.cuda.synchronize()
+
+    # 获取exp_start 数据类型，能获取到tensor 的数据类型么
+    # 在调用_get_sorted_idx后添加验证
+    # logger.error(f"exp_start最大值: {exp_start.max().item()}, sorted_idx长度: {sorted_idx.numel()}")
+    # logger.error(f"exp_end最大值: {exp_end.max().item()}")
+
+    # logger.error(f"[MoeKernel] type(exp_start): {exp_start.dtype}, type(exp_end): {exp_end.dtype}")
+    # logger.error(f"[Debug] exp_start shape: {exp_start.shape}") 
+    # if exp_start.device.type != 'cuda':
+    #     logger.error("ERROR: exp_start不在GPU显存中！")
+    # logger.error(f"exp_start[17]值: {exp_start[17].cpu().numpy()}")
+    # logger.error(f"exp_start数据类型: {exp_start.dtype}")
+
+    # intermediate_cache1 = _make_intermediate((M, topk, N), dtype=out_dtype, device=device, zeros=not full_exp)
     intermediate_cache1 = _make_intermediate((M, topk, N), dtype=out_dtype, device=device, zeros=not full_exp)
     # 新增专家选择分析日志
     # if M != -1234:
@@ -386,6 +428,11 @@ def fused_moe_blocked_fp8(input: torch.Tensor,
     )
 
     ret = intermediate_cache2.sum(dim=1)
+    ep, ep_rank = get_ep_world_rank()
+    if ep_rank == 1:
+        # 检查数据是否都是0
+        if torch.all(ret == 0.0):
+            logger.error(f"[MoE输出分析] 输出全为0，可能是专家选择错误或数据处理错误。")
     # 新增输出维度日志
     # if M != -1234:
     #     logger.error(f"[MoE输出分析] 最终输出形状: {ret.shape} → [token数={M}, 隐藏层维度={ret.shape[-1]}]")

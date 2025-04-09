@@ -652,7 +652,7 @@ class DeepseekV2ForCausalLM(nn.Module, CudaGraphMixin):
                  device: torch.device = None):
         super().__init__()
         self.config = config
-        config.num_hidden_layers = 4 # zmz
+        config.num_hidden_layers = 5 # zmz
         self.quantization_config = getattr(config, 'quantization_config', None)
         self.dtype = dtype
         self.ctx_mgr = ctx_mgr
@@ -873,7 +873,7 @@ class DeepseekV2ForCausalLM(nn.Module, CudaGraphMixin):
             strs = name.split(".")
             if len(strs) >= 3 and str.isdigit(strs[2]):
                 layer_number = int(strs[2])
-                if layer_number >= 4:
+                if layer_number >= 5:
                     continue
             # zmz end
             if 'rotary_emb.inv_freq' in name:

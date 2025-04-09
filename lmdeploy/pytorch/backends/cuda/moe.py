@@ -18,10 +18,13 @@ from lmdeploy.pytorch.models.q_modules import QTensor
 
 from ..moe import (FusedMoEBlockedF8Builder, FusedMoEBlockedF8Impl, FusedMoEBuilder, FusedMoEImpl, FusedMoEW8A8Builder,
                    FusedMoEW8A8Impl)
+from lmdeploy.pytorch.distributed import get_dist_manager, get_ep_world_rank, get_tp_world_rank
 
 from lmdeploy.utils import get_logger
 
 logger = get_logger('lmdeploy')
+
+ep, ep_rank = get_ep_world_rank()
 
 class TritonFusedMoEImpl(FusedMoEImpl):
     """triton fused moe implementation."""
@@ -214,20 +217,16 @@ class TritonFusedMoEBlockedF8Impl(FusedMoEBlockedF8Impl):
         hidden_states 7168
         intermediate_dim 2048
         """
+        
+        # logger.error(f"ep_rank {ep_rank} zmz hidden_states.shape: {hidden_states.shape}, topk_ids.shape: {topk_ids.shape}, topk_weights.shape: {topk_weights.shape}, gate_up_weights.shape: {gate_up_weights.shape}, gate_up_scale.shape: {gate_up_scale.shape}, down_weights.shape: {down_weights.shape}, down_scale.shape: {down_scale.shape}")
         use_triton = os.getenv('ZMZ_USE_TRITON_IMPL', '0') == '1'
         if not use_triton:
-            torch.save(hidden_states, "ep1_hidden_states.pt")
-            torch.save(topk_weights, "ep1_topk_weights.pt")
-            torch.save(topk_ids, "ep1_topk_ids.pt")
-            torch.save(gate_up_weights, "ep1_gate_up_weights.pt")
-            torch.save(gate_up_scale, "ep1_gate_up_scale.pt")
-            torch.save(down_weights, "ep1_down_weights.pt")
-            torch.save(down_scale, "ep1_down_scale.pt")
-            torch.save(expert_list, "ep1_expert_list.pt")
+            pass
+
         # assert False, "zmz debug"
         # if hidden_states.shape[0] != -1234:
-        #     logger.error(f"zmz hidden_states: {hidden_states.shape}, topk_ids: {topk_ids.shape}, topk_weights: {topk_weights.shape}, gate_up_weights: {gate_up_weights.shape}, gate_up_scale: {gate_up_scale.shape}, down_weights: {down_weights.shape}, down_scale: {down_scale.shape}")
-        #     logger.error(f"zmz expert_list: {expert_list}, topk_ids: {topk_ids}, topk_weights: {topk_weights}")
+        #     logger.error(f"ep_rank {ep_rank} zmz hidden_states: {hidden_states.shape}, topk_ids: {topk_ids.shape}, topk_weights: {topk_weights.shape}, gate_up_weights: {gate_up_weights.shape}, gate_up_scale: {gate_up_scale.shape}, down_weights: {down_weights.shape}, down_scale: {down_scale.shape}")
+        #     logger.error(f"ep_rank {ep_rank} zmz expert_list: {expert_list}, topk_ids: {topk_ids}, topk_weights: {topk_weights}")
 
         input_size = hidden_states.shape                # [batch_size*seq_len, hidden_dim]
         hidden_states = hidden_states.flatten(0, -2)    # [batch_size*seq_len, hidden_dim]
@@ -239,6 +238,7 @@ class TritonFusedMoEBlockedF8Impl(FusedMoEBlockedF8Impl):
         if expert_list is not None and len(expert_list) != self.num_experts:
             expert_offset = expert_list[0]
             num_experts = self.num_experts
+        logger.error(f"ep_rank {ep_rank} zmz debug expert_offset: {expert_offset}, num_experts: {num_experts}, topk_ids: {topk_ids}")
         output = fused_moe_blocked_fp8(input_quant,
                                        input_scale,
                                        gate_up_weights,
@@ -255,12 +255,13 @@ class TritonFusedMoEBlockedF8Impl(FusedMoEBlockedF8Impl):
         output = output.unflatten(0, input_size[:-1])
         # out_states = output
         # if hidden_states.shape[0] != -1234:
-        #     logger.error(f"zmz super_out_states.shape: {out_states.shape},")
-        #     # torch.save(out_states, "ep1_out_states.pt")
-        #     logger.error(f"zmz super_out_states: {out_states}")
+        #     logger.error(f"ep_rank {ep_rank} zmz super_out_states.shape: {out_states.shape},")
+        #     # torch.save(out_states, "ep2_base_out_states.pt", cpu=True).to(device)
+        #     logger.error(f"ep_rank {ep_rank} zmz super_out_states: {out_states}")
+
         if not use_triton:
-            torch.save(output, "ep1_output.pt")
-            raise Exception("zmz debug")
+            # raise Exception("zmz debug")
+            pass
         return output
 
 
@@ -360,7 +361,15 @@ class DeepEPMoE:
             )
         return down_output
 
-
+def _log_tensor_diff(tensor1: torch.Tensor, tensor2: torch.Tensor, name1: str, name2: str):
+    """记录张量差异的辅助函数"""
+    logger.error(f"{name1} shape: {tensor1.shape if tensor1 is not None else None} "
+                 f"vs {name2} shape: {tensor2.shape if tensor2 is not None else None}")
+    logger.error(f"{name1} device: {tensor1.device if tensor1 is not None else None} "
+                 f"vs {name2} device: {tensor2.device if tensor2 is not None else None}")
+    if tensor1 is not None and tensor2 is not None:
+        logger.error(f"{name1}[:3]: {tensor1[:3].cpu().detach()}")
+        logger.error(f"{name2}[:3]: {tensor2[:3].cpu().detach()}")
 class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
 
     def __init__(self,
@@ -406,66 +415,108 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
         # 所以，这里需要对topk_ids进行处理，只保留当前rank的experts。
         # 这里的expert_list是当前rank的experts。
 
-        # 接下来输出下token的shape和expert list
-
-
-        logger.error(f"zmz before hidden_states: {hidden_states.shape}, topk_ids: {topk_ids.shape}, topk_weights: {topk_weights.shape}, gate_up_weights: {gate_up_weights.shape}, gate_up_scale: {gate_up_scale.shape}, down_weights: {down_weights.shape}, down_scale: {down_scale.shape}")
-        logger.error(f"zmz before expert_list: {expert_list}, topk_ids: {topk_ids}, topk_weights: {topk_weights}")
-
-        hidden_states = torch.load("ep1_hidden_states.pt")
-        topk_weights = torch.load("ep1_topk_weights.pt")
-        topk_ids = torch.load("ep1_topk_ids.pt")
-        gate_up_scale = torch.load("ep1_gate_up_scale.pt")
-        gate_up_weights = torch.load("ep1_gate_up_weights.pt")
-        down_scale = torch.load("ep1_down_scale.pt")
-        down_weights = torch.load("ep1_down_weights.pt")
-        expert_list = torch.load("ep1_expert_list.pt")
-
-        logger.error(f"zmz after hidden_states: {hidden_states.shape}, topk_ids: {topk_ids.shape}, topk_weights: {topk_weights.shape}, gate_up_weights: {gate_up_weights.shape}, gate_up_scale: {gate_up_scale.shape}, down_weights: {down_weights.shape}, down_scale: {down_scale.shape}")
-        logger.error(f"zmz after expert_list: {expert_list}, topk_ids: {topk_ids}, topk_weights: {topk_weights}")
-
-        # logger.error(f"zmz self.renormalize: {self.renormalize}")
+        # ep, ep_rank = get_ep_world_rank()
         # expert is first
         use_triton = os.getenv('ZMZ_USE_TRITON_IMPL', '0') == '1'
         if use_triton:
-            # logger.error(f"zmz use triton impl")
+            # logger.error(f"ep_rank {ep_rank} zmz use triton impl")
             # if not topk_weights.is_contiguous():
             #     topk_weights = topk_weights.contiguous()
             pass
         else:
             topk_weights = _renormalize(topk_weights, self.renormalize)
 
+        # 数据收集
         recv_hidden_states, recv_topk_ids, recv_topk_weights, tokens_per_expert = (self.token_dispatcher.dispatch(
             hidden_states,
             topk_ids,
             topk_weights.to(torch.float32),
             self.num_experts,
         ))
-        # 需要修改的内容：
-        # 1. 只需要获取dispatch后的input, topk_ids(当前出现的-1，看代码在kernel中是能走过的)
-        # if hidden_states.shape[0] != -1234:
-        #     logger.error(f"zmz recv_hidden_states.shape: {recv_hidden_states.shape}, recv_topk_ids.shape: {recv_topk_ids.shape}, recv_topk_weights.shape: {recv_topk_weights.shape}, tokens_per_expert.shape: {tokens_per_expert.shape}")
-        #     logger.error(f"zmz *recv_hidden_states: {recv_hidden_states}")
-        #     logger.error(f"zmz recv_topk_ids: {recv_topk_ids}, recv_topk_weights: {recv_topk_weights}, tokens_per_expert: {tokens_per_expert}")
 
-        if use_triton:
-            # logger.error(f"zmz use triton impl")
-            out_states = self.triton_impl.forward(recv_hidden_states, recv_topk_weights, recv_topk_ids, gate_up_weights,
-                gate_up_scale, down_weights, down_scale, expert_list=expert_list )
-        else:
-            out_states = self.experts.forward(recv_hidden_states, tokens_per_expert, gate_up_weights, gate_up_scale,
-                                          down_weights, down_scale)
-
-
-        out_states = self.token_dispatcher.combine(out_states)
-        out_states_ep1 = torch.load("ep1_output.pt")
-        logger.error(f"zmz out_states.shape: {out_states.shape}, out_states_ep1.shape: {out_states_ep1.shape}")
-        assert torch.allclose(out_states, out_states_ep1, atol=1e-5, rtol=1e-5)
-        logger.error("allclose success")
+        logger.error(f"ep_rank {ep_rank} zmz debug recv_hidden_states.shape: {recv_hidden_states.shape}, recv_topk_ids.shape: {recv_topk_ids.shape}, recv_topk_weights.shape: {recv_topk_weights.shape}, tokens_per_expert.shape: {tokens_per_expert.shape}, gate_up_weights.shape: {gate_up_weights.shape}, gate_up_scale.shape: {gate_up_scale.shape}, down_weights.shape: {down_weights.shape}, down_scale.shape: {down_scale.shape}")
+        logger.error(f"ep_rank {ep_rank} zmz debug recv_topk_ids: {recv_topk_ids}, recv_topk_weights: {recv_topk_weights}")
+        device = hidden_states.device
         
-        print(f"out_states: {out_states.shape}, out_states1: {out_states_ep1.shape}, out_states: {out_states}, out_states1: {out_states_ep1}")
-        assert torch.allclose(out_states, out_states_ep1, atol=1e-2, rtol=1e-2)
-        raise Exception("zmz debug ep2")
+        if use_triton:
+            
+            if ep_rank == 100000:
+                load_hidden_state = torch.load("ep2_base_hidden_states.pt", map_location='cpu').to(device)
+                load_topk_weights = torch.load("ep2_base_topk_weights.pt", map_location='cpu').to(device)
+                load_topk_ids = torch.load("ep2_base_topk_ids.pt", map_location='cpu').to(device)
+                load_gate_up_weights = torch.load("ep2_base_gate_up_weights.pt", map_location='cpu').to(device)
+                # load_gate_up_scale = torch.load("ep2_base_gate_up_scale.pt", map_location='cpu').to(device)
+                # load_down_weights = torch.load("ep2_base_down_weights.pt", map_location='cpu').to(device)
+                # load_down_scale = torch.load("ep2_base_down_scale.pt", map_location='cpu').to(device)
+                load_expert_list = torch.load("ep2_base_expert_list.pt")
+                # 调试建议：在断言前添加维度/数据类型/设备检查
+                logger.error(f"load_hidden_shape: {load_hidden_state.shape} vs recv_shape: {recv_hidden_states.shape}")
+                logger.error(f"load_hidden_device: {load_hidden_state.device} vs recv_device: {recv_hidden_states.device}")
+                logger.error(f"load_hidden_dtype: {load_hidden_state.dtype} vs recv_dtype: {recv_hidden_states.dtype}")
+                
+                # 数值对比建议：打印前几个元素的差异
+                _log_tensor_diff(load_hidden_state, recv_hidden_states, "load_hidden", "recv_hidden")
+                # logger.error(f"load_hidden[:3]: {load_hidden_state[:3].cpu()}")
+                # logger.error(f"recv_hidden[:3]: {recv_hidden_states[:3].cpu()}")
+                assert torch.allclose(load_hidden_state, recv_hidden_states, atol=1e-3, rtol=1e-3)
+                _log_tensor_diff(load_topk_weights, recv_topk_weights, "load_topk_weights", "recv_topk_weights")
+                assert torch.allclose(load_topk_weights, recv_topk_weights, atol=1e-3, rtol=1e-3)
+                # 有问题1，需要都指定ep0去比较
+                _log_tensor_diff(load_topk_ids, recv_topk_ids, "load_topk_ids", "recv_topk_ids")
+                assert torch.allclose(load_topk_ids, recv_topk_ids, atol=1e-3, rtol=1e-3)
+                # 有问题2：RuntimeError: "mul_cuda" not implemented for 'Float8_e4m3fn'
+                # _log_tensor_diff(load_gate_up_weights, gate_up_weights, "load_gate_up_weights", "gate_up_weights")
+                # assert torch.allclose(load_gate_up_weights.to(torch.float16), gate_up_weights.to(torch.float16), atol=1e-3, rtol=1e-3)
+                # _log_tensor_diff(load_gate_up_scale, gate_up_scale, "load_gate_up_scale", "gate_up_scale")
+                # assert torch.allclose(load_gate_up_scale.to(torch.float16), gate_up_scale.to(torch.float16), atol=1e-1, rtol=1e-1)
+                # _log_tensor_diff(load_down_weights, down_weights, "load_down_weights", "down_weights")
+                # assert torch.allclose(load_down_weights.to(torch.float16), down_weights.to(torch.float16), atol=1e-1, rtol=1e-1)
+                # _log_tensor_diff(load_down_scale, down_scale, "load_down_scale", "down_scale")
+                # assert torch.allclose(load_down_scale.to(torch.float16), down_scale.to(torch.float16), atol=1e-1, rtol=1e-1)
+                # _log_tensor_diff(load_expert_list, expert_list, "load_expert_list", "expert_list")
+                assert all(a == b for a, b in zip(load_expert_list, expert_list)), "List content mismatch"
+
+            # logger.error(f"ep_rank {ep_rank} zmz debug before expert_list: {expert_list}")
+            out_states0 = self.triton_impl.forward(recv_hidden_states, recv_topk_weights, recv_topk_ids, gate_up_weights,
+                                                   gate_up_scale, down_weights, down_scale, expert_list=expert_list)
+            if ep_rank == 100000:
+                load_out_states0 = torch.load("ep2_base_output.pt", map_location='cpu').to(device)
+                _log_tensor_diff(out_states0, load_out_states0, "out_states0", "load_out_states0")
+                assert torch.allclose(out_states0, load_out_states0, atol=0.05, rtol=0.05)
+                logger.error(f"ep_rank {ep_rank} zmz debug atol 0.05 ok")
+                # assert torch.allclose(out_states0, load_out_states0, atol=1e-3, rtol=1e-3)
+            logger.error(f"ep_rank {ep_rank} zmz debug ok")
+        else:
+            if ep_rank == 100000:
+                torch.save(recv_hidden_states, "ep2_base_hidden_states.pt")
+                torch.save(recv_topk_weights, "ep2_base_topk_weights.pt")
+                torch.save(recv_topk_ids, "ep2_base_topk_ids.pt")
+                torch.save(gate_up_weights, "ep2_base_gate_up_weights.pt")
+                torch.save(gate_up_scale, "ep2_base_gate_up_scale.pt")
+                torch.save(down_weights, "ep2_base_down_weights.pt")
+                torch.save(down_scale, "ep2_base_down_scale.pt")
+                # torch.save(tokens_per_expert, "ep2_base_tokens_per_expert.pt")
+                torch.save(expert_list, "ep2_base_expert_list.pt")
+            if recv_hidden_states.shape[0] > 0:
+                recv_hidden_states = self.token_dispatcher.get_permuted_hidden_states_by_experts(recv_hidden_states)
+            # else:
+            #     logger.error(f"ep_rank {ep_rank} zmz debug shape[0] == 0, recv_hidden_states.shape: {recv_hidden_states.shape}")
+            out_states0 = self.experts.forward(recv_hidden_states, tokens_per_expert, gate_up_weights, gate_up_scale,
+                                               down_weights, down_scale)
+            if out_states0.shape[0] > 0:
+                out_states0 = self.token_dispatcher.get_restored_hidden_states_by_experts(out_states0)
+            if ep_rank == 100000:
+                torch.save(out_states0, "ep2_base_output.pt")
+            # else:
+            #     logger.error(f"ep_rank {ep_rank} zmz debug shape[0] == 0, out_states0.shape: {out_states0.shape}")
+
+        # 数据合并
+        out_states = self.token_dispatcher.combine(out_states0)
+        # if use_triton:
+        #     load_out_states = torch.load("ep2_base_output.pt", cpu=True).to(device)
+        #     assert torch.allclose(out_states, load_out_states)
+        #     logger.error(f"ep_rank {ep_rank} zmz debug ok")
+        # raise Exception("zmz debug")
 
         return out_states
 
