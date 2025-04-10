@@ -236,6 +236,33 @@ class TritonFusedMoEBlockedF8Impl(FusedMoEBlockedF8Impl):
         return output
 
 class DlblasTritonFusedMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
+    """triton fused moe blocked f8 implementation."""
+
+    def __init__(self,
+                 top_k: int,
+                 num_experts: int,
+                 renormalize: bool = False,
+                 block_size: int = 128,
+                 out_dtype: torch.dtype = torch.float16):
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.renormalize = renormalize
+        self.block_size = block_size
+        self.out_dtype = out_dtype
+
+    def support_ep(self):
+        """support expert parallelism."""
+        return True
+
+    def ep_expert_list(self, world_size: int, rank: int):
+        """experts list of current rank."""
+        num_experts = self.num_experts
+        expert_per_rank = (num_experts + world_size - 1) // world_size
+        first_expert = rank * expert_per_rank
+        last_expert = min(first_expert + expert_per_rank, num_experts)
+        return list(range(first_expert, last_expert))
+
+
     def forward(self,
                 hidden_states: torch.Tensor,
                 topk_weights: torch.Tensor,
