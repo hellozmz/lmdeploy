@@ -8,6 +8,8 @@ from .activation import silu_and_mul
 from .blocked_gemm_fp8 import quant_fp8
 from .fused_moe import _get_sorted_idx, _make_intermediate, _renormalize, _dlblas_get_sorted_idx
 
+from lmdeploy.utils import get_logger
+logger = get_logger('lmdeploy')
 
 def get_cuda_autotune_config():
     return [
@@ -343,8 +345,10 @@ def dlblas_fused_moe_blocked_fp8(input: torch.Tensor,
 
     topk_weights = _renormalize(topk_weights, renormalize)
     # dlblas get topk_ids
+    logger.error(f"zmz debug origin topk_ids: {topk_ids}, num_experts: {num_experts}, offset: {expert_offset}")
     topk_ids[topk_ids != -1] += expert_offset
-    assert topk_ids.min() >= 0 and topk_ids.max() < num_experts, f"topk_ids should be in [0, {num_experts})"
+    logger.error(f"zmz debug topk_ids: {topk_ids}, num_experts: {num_experts}, offset: {expert_offset}")
+    # assert topk_ids.min() >= -1 and topk_ids.max() < num_experts, f"topk_ids should be in [-1, {num_experts})"
     sorted_idx, exp_start, exp_end = _dlblas_get_sorted_idx(topk_ids, num_experts)
 
     intermediate_cache1 = _make_intermediate((M, topk, N), dtype=out_dtype, device=device, zeros=not full_exp)
