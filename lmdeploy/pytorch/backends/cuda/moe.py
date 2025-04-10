@@ -440,7 +440,7 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
         
         if use_triton:
             
-            if ep_rank == 100000:
+            if ep_rank == -1:
                 load_hidden_state = torch.load("ep2_base_hidden_states.pt", map_location='cpu').to(device)
                 load_topk_weights = torch.load("ep2_base_topk_weights.pt", map_location='cpu').to(device)
                 load_topk_ids = torch.load("ep2_base_topk_ids.pt", map_location='cpu').to(device)
@@ -474,20 +474,22 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
                 # _log_tensor_diff(load_down_scale, down_scale, "load_down_scale", "down_scale")
                 # assert torch.allclose(load_down_scale.to(torch.float16), down_scale.to(torch.float16), atol=1e-1, rtol=1e-1)
                 # _log_tensor_diff(load_expert_list, expert_list, "load_expert_list", "expert_list")
+                logger.error(f"load_expert_list: {load_expert_list} vs expert_list: {expert_list}")
                 assert all(a == b for a, b in zip(load_expert_list, expert_list)), "List content mismatch"
 
             # logger.error(f"ep_rank {ep_rank} zmz debug before expert_list: {expert_list}")
             out_states0 = self.triton_impl.forward(recv_hidden_states, recv_topk_weights, recv_topk_ids, gate_up_weights,
                                                    gate_up_scale, down_weights, down_scale, expert_list=expert_list)
-            if ep_rank == 100000:
+            if ep_rank == -1:
                 load_out_states0 = torch.load("ep2_base_output.pt", map_location='cpu').to(device)
                 _log_tensor_diff(out_states0, load_out_states0, "out_states0", "load_out_states0")
                 assert torch.allclose(out_states0, load_out_states0, atol=0.05, rtol=0.05)
-                logger.error(f"ep_rank {ep_rank} zmz debug atol 0.05 ok")
+                max_diff = torch.max(torch.abs(out_states0 - load_out_states0))
+                logger.error(f"ep_rank {ep_rank} zmz debug atol 0.05 ok, max_diff: {max_diff}")
                 # assert torch.allclose(out_states0, load_out_states0, atol=1e-3, rtol=1e-3)
             logger.error(f"ep_rank {ep_rank} zmz debug ok")
         else:
-            if ep_rank == 100000:
+            if ep_rank == -1:
                 torch.save(recv_hidden_states, "ep2_base_hidden_states.pt")
                 torch.save(recv_topk_weights, "ep2_base_topk_weights.pt")
                 torch.save(recv_topk_ids, "ep2_base_topk_ids.pt")
@@ -497,6 +499,7 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
                 torch.save(down_scale, "ep2_base_down_scale.pt")
                 # torch.save(tokens_per_expert, "ep2_base_tokens_per_expert.pt")
                 torch.save(expert_list, "ep2_base_expert_list.pt")
+                logger.error(f"ep_rank {ep_rank} zmz debug save ok")
             if recv_hidden_states.shape[0] > 0:
                 recv_hidden_states = self.token_dispatcher.get_permuted_hidden_states_by_experts(recv_hidden_states)
             # else:
@@ -505,7 +508,7 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
                                                down_weights, down_scale)
             if out_states0.shape[0] > 0:
                 out_states0 = self.token_dispatcher.get_restored_hidden_states_by_experts(out_states0)
-            if ep_rank == 100000:
+            if ep_rank == -1:
                 torch.save(out_states0, "ep2_base_output.pt")
             # else:
             #     logger.error(f"ep_rank {ep_rank} zmz debug shape[0] == 0, out_states0.shape: {out_states0.shape}")
