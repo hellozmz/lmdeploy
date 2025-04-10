@@ -6,7 +6,7 @@ import triton.language as tl
 
 from .activation import silu_and_mul
 from .blocked_gemm_fp8 import quant_fp8
-from .fused_moe import _get_sorted_idx, _make_intermediate, _renormalize
+from .fused_moe import _get_sorted_idx, _make_intermediate, _renormalize, _dlblas_get_sorted_idx
 
 
 def get_cuda_autotune_config():
@@ -268,6 +268,84 @@ def fused_moe_blocked_fp8(input: torch.Tensor,
 
     topk_weights = _renormalize(topk_weights, renormalize)
     sorted_idx, exp_start, exp_end = _get_sorted_idx(topk_ids, num_experts)
+
+    intermediate_cache1 = _make_intermediate((M, topk, N), dtype=out_dtype, device=device, zeros=not full_exp)
+    # gate and up
+    fused_moe_blocked_fp8_kernel_launcher(
+        input,
+        input_scale,
+        w1,
+        w1_scale,
+        intermediate_cache1,
+        sorted_idx=sorted_idx,
+        exp_start=exp_start,
+        exp_end=exp_end,
+        weights=topk_weights,
+        enable_weights=False,
+        top_k=topk,
+        num_tokens=M,
+        expert_offset=expert_offset,
+        reindex_a=True,
+        reindex_c=False,
+    )
+
+    # activate
+    intermediate_cache1 = intermediate_cache1.flatten(0, -2)
+    gate_cache = silu_and_mul(intermediate_cache1)
+    del intermediate_cache1
+    gate_cache, gate_scale = quant_fp8(gate_cache, group_size, dtype=input.dtype)
+
+    intermediate_cache2 = _make_intermediate((M, topk, w2.shape[1]), dtype=out_dtype, device=device, zeros=not full_exp)
+    # down
+    fused_moe_blocked_fp8_kernel_launcher(
+        gate_cache,
+        gate_scale,
+        w2,
+        w2_scale,
+        intermediate_cache2,
+        sorted_idx=sorted_idx,
+        exp_start=exp_start,
+        exp_end=exp_end,
+        weights=topk_weights,
+        enable_weights=True,
+        top_k=1,
+        num_tokens=M,
+        expert_offset=expert_offset,
+        reindex_a=False,
+        reindex_c=True,
+    )
+
+    ret = intermediate_cache2.sum(dim=1)
+    return ret
+
+
+def dlblas_fused_moe_blocked_fp8(input: torch.Tensor,
+                                 input_scale: torch.Tensor,
+                                 w1: torch.Tensor,
+                                 w1_scale: torch.Tensor,
+                                 w2: torch.Tensor,
+                                 w2_scale: torch.Tensor,
+                                 topk_weights: torch.Tensor,
+                                 topk_ids: torch.Tensor,
+                                 topk: int,
+                                 out_dtype: torch.dtype = torch.float16,
+                                 expert_offset: int = 0,
+                                 num_experts: int = None,
+                                 renormalize: bool = False) -> torch.Tensor:
+    """fused moe."""
+    device = input.device
+    M = input.size(0)
+    E, N, _ = w1.shape
+    if num_experts is None:
+        num_experts = E
+    full_exp = num_experts == E
+    group_size = input.size(-1) // input_scale.size(-1)
+
+    topk_weights = _renormalize(topk_weights, renormalize)
+    # dlblas get topk_ids
+    topk_ids[topk_ids != -1] += expert_offset
+    assert topk_ids.min() >= 0 and topk_ids.max() < num_experts, f"topk_ids should be in [0, {num_experts})"
+    sorted_idx, exp_start, exp_end = _dlblas_get_sorted_idx(topk_ids, num_experts)
 
     intermediate_cache1 = _make_intermediate((M, topk, N), dtype=out_dtype, device=device, zeros=not full_exp)
     # gate and up
