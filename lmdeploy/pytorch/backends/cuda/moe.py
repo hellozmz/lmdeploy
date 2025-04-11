@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 
 from lmdeploy.pytorch.backends.cuda.token_dispatcher import DeepEPTokenDispatcherLowLatency, TokenDispatcherBuilder
+from lmdeploy.pytorch.distributed import prefill_without_permute
 from lmdeploy.pytorch.kernels.cuda import fused_moe, fused_moe_w8a8
 from lmdeploy.pytorch.kernels.cuda.blocked_fp8_fused_moe import fused_moe_blocked_fp8, dlblas_fused_moe_blocked_fp8
 from lmdeploy.pytorch.kernels.cuda.blocked_gemm_fp8 import quant_fp8
@@ -21,11 +22,7 @@ from ..moe import (FusedMoEBlockedF8Builder, FusedMoEBlockedF8Impl, FusedMoEBuil
                    FusedMoEW8A8Impl)
 
 logger = get_logger('lmdeploy')
-
-from lmdeploy.pytorch.distributed import get_dist_manager, get_ep_world_rank, get_tp_world_rank
-ep, ep_rank = get_ep_world_rank()
-
-import os
+is_prefill_without_permute = prefill_without_permute()
 
 class TritonFusedMoEImpl(FusedMoEImpl):
     """triton fused moe implementation."""
@@ -494,7 +491,6 @@ class FusedMoENormal:
                 expert_list: List[int] = None,
                 triton_impl: DlblasTritonFusedMoEBlockedF8Impl = None):
         """forward."""
-        use_triton = os.getenv('ZMZ_USE_TRITON_IMPL', '0') == '1'
         recv_hidden_states, recv_topk_ids, recv_topk_weights, tokens_per_expert = self.token_dispatcher.dispatch(
             hidden_states,
             topk_ids,
@@ -502,7 +498,7 @@ class FusedMoENormal:
             expert_list,
         )
 
-        if use_triton:
+        if is_prefill_without_permute:
             out_states = triton_impl.forward(recv_hidden_states, recv_topk_weights, recv_topk_ids, up_weights, up_scale,
                                              down_weights, down_scale)
         else:
@@ -603,8 +599,7 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
                 down_scale: torch.Tensor,
                 expert_list: List[int] = None):
         """forward."""
-        use_triton = os.getenv('ZMZ_USE_TRITON_IMPL', '0') == '1'
-        if use_triton:
+        if is_prefill_without_permute:
             pass
         else:
             topk_weights = _renormalize(topk_weights, self.renormalize)
@@ -612,12 +607,12 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
         step_ctx = get_step_ctx_manager().current_context()
         moe = None
 
-        if step_ctx.is_decoding is False or self.use_deep_gemm is False or use_triton:
+        if step_ctx.is_decoding is False or self.use_deep_gemm is False:
             moe = FusedMoENormal(self.ep_size, self.ep_group, self.num_experts, self.hidden_dim, self.block_size,
-                                    self.out_dtype)
+                                 self.out_dtype)
             
             out_states = moe.forward(hidden_states, topk_weights, topk_ids, gate_up_weights, gate_up_scale, down_weights,
-                                    down_scale, expert_list, self.triton_impl)
+                                     down_scale, expert_list, self.triton_impl)
         else:
             moe = FusedMoELowLatency(self.ep_size, self.ep_group, self.num_experts, self.hidden_dim, self.block_size,
                                      self.out_dtype)
