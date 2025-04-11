@@ -465,17 +465,6 @@ class DeepEPExpertsDeepGEMM:
                                                                               down_output, masked_m, expected_m)
         return down_output
 
-
-def _log_tensor_diff(tensor1: torch.Tensor, tensor2: torch.Tensor, name1: str, name2: str):
-    """记录张量差异的辅助函数"""
-    logger.error(f"{name1} shape: {tensor1.shape if tensor1 is not None else None} "
-                 f"vs {name2} shape: {tensor2.shape if tensor2 is not None else None}")
-    logger.error(f"{name1} device: {tensor1.device if tensor1 is not None else None} "
-                 f"vs {name2} device: {tensor2.device if tensor2 is not None else None}")
-    if tensor1 is not None and tensor2 is not None:
-        logger.error(f"{name1}[:3]: {tensor1[:3].cpu().detach()}")
-        logger.error(f"{name2}[:3]: {tensor2[:3].cpu().detach()}")
-
 class FusedMoENormal:
 
     def __init__(self,
