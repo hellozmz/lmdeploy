@@ -547,8 +547,6 @@ class FusedMoELowLatency:
                 down_weights: torch.Tensor,
                 down_scale: torch.Tensor,
                 expert_list: List[int] = None):
-                # expert_list: List[int] = None,
-                # triton_impl: DlblasTritonFusedMoEBlockedF8Impl = None):
         """forward."""
         recv_hidden_states, topk_idx, topk_weights, masked_m, expected_m = self.token_dispatcher.dispatch(
             hidden_states,
@@ -556,8 +554,6 @@ class FusedMoELowLatency:
             topk_weights,
             self.num_experts,
         )
-        # out_states = triton_impl.forward(recv_hidden_states, topk_weights, topk_idx, up_weights, up_scale,
-        #                                      down_weights, down_scale)
         out_states = self.experts.forward(recv_hidden_states, up_weights, up_scale, down_weights, down_scale, masked_m,
                                           expected_m)
         out_states = self.token_dispatcher.combine(out_states, topk_idx, topk_weights)
