@@ -274,6 +274,8 @@ class DlblasTritonFusedMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
                 down_scale: torch.Tensor,
                 expert_list: List[int] = None):
         """forward."""
+        if hidden_states.shape[0] > 10000: 
+            logger.error(f'in DlblasTritonFusedMoEBlockedF8Impl GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
         input_size = hidden_states.shape
         hidden_states = hidden_states.flatten(0, -2)
         input_quant, input_scale = quant_fp8(hidden_states, self.block_size, dtype=gate_up_weights.dtype)
@@ -297,6 +299,8 @@ class DlblasTritonFusedMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
                                               num_experts=num_experts,
                                               renormalize=self.renormalize)
         output = output.unflatten(0, input_size[:-1])
+        if hidden_states.shape[0] > 10000: 
+            logger.error(f'out DlblasTritonFusedMoEBlockedF8Impl GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
         return output
 
 
@@ -319,6 +323,8 @@ class DeepEPExpertsGroupedGEMM:
 
     def forward(self, hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor, gate_up_weight: torch.Tensor,
                 gate_up_scale: torch.Tensor, gate_down_weight: torch.Tensor, gate_down_scale: torch.Tensor):
+        if hidden_states.shape[0] > 10000:
+            logger.error(f'in DeepEPExpertsGroupedGEMM GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
         seg_indptr_cur_rank = torch.cat([
             torch.zeros(1, device=tokens_per_expert.device, dtype=tokens_per_expert.dtype),
             torch.cumsum(tokens_per_expert, dim=0),
@@ -332,12 +338,19 @@ class DeepEPExpertsGroupedGEMM:
         )
 
         # GroupGemm-0
+        if hidden_states.shape[0] > 10000:
+            logger.error(f'in DeepEPExpertsGroupedGEMM before gemm0 GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
+            logger.error(f"hidden_states shape: {hidden_states.shape}")
         gateup_output = torch.empty(
             hidden_states.shape[0],
             gate_up_weight.shape[1],
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
+        
+        if hidden_states.shape[0] > 10000:
+            logger.error(f"gateup_output shape: {gateup_output.shape}")
+            logger.error(f'in DeepEPExpertsGroupedGEMM gemm0 GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
         if hidden_states.shape[0] > 0:
             input, input_scale = quant_fp8(hidden_states, 128, dtype=gate_up_weight.dtype)
             gateup_output = grouped_gemm_triton(
@@ -372,6 +385,9 @@ class DeepEPExpertsGroupedGEMM:
             BLOCK_SIZE=512,
         )
 
+        if hidden_states.shape[0] > 10000:
+            logger.error(f'in DeepEPExpertsGroupedGEMM before gemm1 GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
+            logger.error(f"down_input shape: {down_input.shape}")
         # GroupGemm-1
         down_output = torch.empty(
             down_input.shape[0],
@@ -379,6 +395,9 @@ class DeepEPExpertsGroupedGEMM:
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
+        if hidden_states.shape[0] > 10000:
+            logger.error(f"down_output shape: {down_output.shape}")
+            logger.error(f'in DeepEPExpertsGroupedGEMM gemm1 GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
         if down_input.shape[0] > 0:
             down_input, down_input_scale = quant_fp8(down_input, 128, dtype=gate_down_weight.dtype)
             down_output = grouped_gemm_triton(
@@ -394,6 +413,9 @@ class DeepEPExpertsGroupedGEMM:
                 scale_b=gate_down_scale,
                 block_shape=self.block_shape,
             )
+        # 打印GPU显存占用情况
+        if hidden_states.shape[0] > 10000:
+            logger.error(f'out DeepEPExpertsGroupedGEMM GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
         return down_output
 
 
@@ -499,18 +521,23 @@ class FusedMoENormal:
         )
 
         if is_prefill_without_permute:
+            logger.error(f'in is_prefill_without_permute GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
             out_states = triton_impl.forward(recv_hidden_states, recv_topk_weights, recv_topk_ids, up_weights, up_scale,
                                              down_weights, down_scale)
+            logger.error(f'out is_prefill_without_permute GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
         else:
+            logger.error(f'in NOT is_prefill_without_permute GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
             # permute
             if recv_hidden_states.shape[0] > 0:
                 recv_hidden_states = self.token_dispatcher.get_permuted_hidden_states_by_experts(recv_hidden_states)
+            logger.error(f'in NOT is_prefill_without_permute after permute GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
             # compute
             out_states = self.experts.forward(recv_hidden_states, tokens_per_expert, up_weights, up_scale, down_weights,
                                               down_scale)
             # unpermute
             if out_states.shape[0] > 0:
                 out_states = self.token_dispatcher.get_restored_hidden_states_by_experts(out_states)
+            logger.error(f'out NOT is_prefill_without_permute GPU memory usage: {torch.cuda.memory_allocated() / 1024 / 1024 :.2f} MB')
         out_states = self.token_dispatcher.combine(out_states)
         return out_states
 
@@ -618,6 +645,7 @@ class FusedDeepEpMoEBlockedF8Impl(TritonFusedMoEBlockedF8Impl):
                                      self.out_dtype)
             out_states = moe.forward(hidden_states, topk_weights, topk_ids, gate_up_weights, gate_up_scale, down_weights,
                                      down_scale, expert_list)
+        # raise RuntimeError("zmz debug")
         return out_states
 
 
